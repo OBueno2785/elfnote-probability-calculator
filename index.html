@@ -41,6 +41,21 @@
   .placeholder{color:#9aa7b8;text-align:center;padding:3rem 1rem;font-size:.9rem}
   .err{background:#fdecec;border:1px solid #f5b5b5;color:#a12b2b;padding:.7rem;border-radius:8px;font-size:.82rem}
   h3.sec{font-size:.95rem;color:var(--navy);margin:.2rem 0 .7rem;border-left:4px solid var(--blue);padding-left:.5rem}
+  .deckgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:.5rem}
+  .tile{border:1px solid var(--border);border-radius:8px;padding:.5rem;background:#fff;position:relative}
+  .tile.is-starter{border-color:var(--blue);box-shadow:0 0 0 2px rgba(46,109,164,.2)}
+  .tile.is-ht{background:#f0faf2}
+  .tile.is-ht.is-starter{background:#eef5fb}
+  .tcount{position:absolute;top:.4rem;right:.5rem;font-size:.7rem;font-weight:800;color:#42526b}
+  .tname{font-size:.76rem;font-weight:600;color:var(--navy);min-height:2.2em;padding-right:1.7rem}
+  .ttoggles{display:flex;gap:.3rem;align-items:center;margin-top:.45rem;flex-wrap:wrap}
+  .tg{font-size:.66rem;font-weight:700;padding:.22rem .45rem;border-radius:5px;border:1px solid var(--border);background:#f4f6f9;color:#42526b;width:auto;cursor:pointer}
+  .tg:hover{filter:brightness(.97)}
+  .tg.on-s{background:var(--blue);color:#fff;border-color:var(--blue)}
+  .tg.on-h{background:#2a9d5c;color:#fff;border-color:#2a9d5c}
+  select.pw{width:auto;font-size:.66rem;padding:.12rem .2rem}
+  .legend{font-size:.72rem;color:#7a8699;margin:.2rem 0 .7rem;display:flex;gap:1.1rem;flex-wrap:wrap;align-items:center}
+  .dot{display:inline-block;width:.7rem;height:.7rem;border-radius:3px;vertical-align:-1px;margin-right:.25rem}
 </style>
 </head>
 <body>
@@ -58,8 +73,9 @@
         <label>Subir archivo .txt</label>
         <input type="file" id="file" accept=".txt,text/plain">
         <label>o pega/edita la lista</label>
-        <textarea id="deck" rows="10" spellcheck="false"></textarea>
+        <textarea id="deck" rows="9" spellcheck="false"></textarea>
         <p class="muted">Formato: encabezados <code>Main Deck:</code> / <code>Extra Deck:</code> / <code>Side Deck:</code> y líneas <code>3x Nombre de carta</code>.</p>
+        <button id="view" style="margin-top:.6rem;background:#42526b">Ver / actualizar mazo →</button>
       </div>
 
       <div class="card">
@@ -73,14 +89,9 @@
         </select>
 
         <details>
-          <summary>Handtraps (1 por línea)</summary>
-          <textarea id="ht" rows="7" spellcheck="false"></textarea>
-        </details>
-
-        <details>
-          <summary>Combos y su poder (1-5)</summary>
-          <p class="muted">Formato: <code>Carta = poder</code> (starter de 1 carta) o <code>CartaA + CartaB = poder</code>.</p>
-          <textarea id="combos" rows="12" spellcheck="false"></textarea>
+          <summary>Combos avanzados de 2+ cartas (opcional)</summary>
+          <p class="muted">Los starters de 1 carta se marcan en el mazo. Aquí solo combos múltiples: <code>CartaA + CartaB = poder</code>.</p>
+          <textarea id="combos" rows="9" spellcheck="false"></textarea>
         </details>
       </div>
 
@@ -88,10 +99,11 @@
       <div class="status" id="status"></div>
     </div>
 
-    <!-- ====== Resultados ====== -->
+    <!-- ====== Mazo + Resultados ====== -->
     <div>
+      <div id="deckview"></div>
       <div id="out">
-        <div class="card"><div class="placeholder">Configura el mazo y pulsa <b>Analizar</b> para generar las probabilidades y gráficos.</div></div>
+        <div class="card"><div class="placeholder">Marca los <b>starters</b> y <b>handtraps</b> en el mazo y pulsa <b>Analizar</b> para generar las probabilidades y gráficos.</div></div>
       </div>
     </div>
   </div>
@@ -465,18 +477,103 @@ Medius the Pure + The Golden Swordsoul = 4</script>
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-$('deck').value=$('default-deck').textContent.trim();
-$('ht').value=$('default-ht').textContent.trim();
-$('combos').value=$('default-combos').textContent.trim();
+function setStatus(html){ $('status').innerHTML=html; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// ----- Estado de selección -----
+let starterPower={};      // nombre -> poder (1-card combo)
+let handtrapSet=new Set();
+let currentCards=[];      // [{name,count}] del Main Deck
+
+$('deck').value=$('default-deck').textContent.trim();
+
+function initDefaults(){
+  starterPower={}; handtrapSet=new Set();
+  // Combos por defecto: 1 carta -> starter; 2+ cartas -> textarea avanzada
+  const advanced=[];
+  for(const raw of $('default-combos').textContent.trim().split(/\r?\n/)){
+    const line=raw.trim(); if(!line.includes('=')) continue;
+    const i=line.lastIndexOf('=');
+    const power=parseInt(line.slice(i+1).trim(),10); if(isNaN(power)) continue;
+    const cards=line.slice(0,i).split('+').map(s=>s.trim().replace(/&amp;/g,'&')).filter(Boolean);
+    if(cards.length===1) starterPower[cards[0]]=power;
+    else if(cards.length>1) advanced.push(line);
+  }
+  $('combos').value=advanced.join('\n');
+  for(const raw of $('default-ht').textContent.trim().split(/\r?\n/)){
+    const n=raw.trim().replace(/&amp;/g,'&'); if(n) handtrapSet.add(n);
+  }
+}
+
+function parseDeckMain(text){
+  const cards=[]; let inMain=false, started=false;
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim(); if(!line) continue;
+    const low=line.toLowerCase();
+    if(low.startsWith('main deck')){ inMain=true; started=true; continue; }
+    if(low.startsWith('extra deck')||low.startsWith('side deck')){ inMain=false; started=true; continue; }
+    if(!started) inMain=true;            // sin encabezado -> asumir main
+    if(!inMain) continue;
+    const m=line.match(/^(\d+)\s*x\s+(.*)$/i);
+    if(m) cards.push({count:parseInt(m[1],10), name:m[2].replace(/&amp;/g,'&').trim()});
+  }
+  return cards;
+}
+
+function renderDeck(){
+  currentCards=parseDeckMain($('deck').value);
+  if(!currentCards.length){
+    $('deckview').innerHTML='<div class="card"><div class="err">No se detectaron cartas en el Main Deck. Revisa el formato.</div></div>';
+    return;
+  }
+  const total=currentCards.reduce((a,c)=>a+c.count,0);
+  const nS=currentCards.filter(c=>c.name in starterPower).reduce((a,c)=>a+c.count,0);
+  const nH=currentCards.filter(c=>handtrapSet.has(c.name)).reduce((a,c)=>a+c.count,0);
+  let h='<div class="card"><h2>Selecciona starters y handtraps</h2>';
+  h+='<div class="legend">'
+    +'<span><span class="dot" style="background:#2e6da4"></span>Starter (combo 1 carta): <b>'+nS+'</b></span>'
+    +'<span><span class="dot" style="background:#2a9d5c"></span>Handtrap: <b>'+nH+'</b></span>'
+    +'<span>Total Main: <b>'+total+'</b></span></div>';
+  h+='<div class="deckgrid">';
+  for(const c of currentCards){
+    const isS=c.name in starterPower, isH=handtrapSet.has(c.name), pw=starterPower[c.name]||4;
+    const opts=[3,4,5].map(v=>`<option value="${v}" ${v===pw?'selected':''}>P${v}</option>`).join('');
+    h+=`<div class="tile ${isS?'is-starter':''} ${isH?'is-ht':''}" data-name="${esc(c.name)}">
+      <div class="tcount">${c.count}x</div>
+      <div class="tname">${esc(c.name)}</div>
+      <div class="ttoggles">
+        <button class="tg tg-s ${isS?'on-s':''}" data-act="s">Starter</button>
+        <select class="pw" data-act="pw" ${isS?'':'disabled'}>${opts}</select>
+        <button class="tg tg-h ${isH?'on-h':''}" data-act="h">HT</button>
+      </div></div>`;
+  }
+  h+='</div></div>';
+  $('deckview').innerHTML=h;
+}
+
+$('deckview').addEventListener('click',e=>{
+  const btn=e.target.closest('.tg'); if(!btn) return;
+  const name=btn.closest('.tile').dataset.name, act=btn.dataset.act;
+  if(act==='s'){ if(name in starterPower) delete starterPower[name]; else starterPower[name]=4; }
+  if(act==='h'){ if(handtrapSet.has(name)) handtrapSet.delete(name); else handtrapSet.add(name); }
+  renderDeck();
+});
+$('deckview').addEventListener('change',e=>{
+  const sel=e.target.closest('select.pw'); if(!sel) return;
+  const name=sel.closest('.tile').dataset.name;
+  if(name in starterPower) starterPower[name]=parseInt(sel.value,10);
+});
+
+$('view').addEventListener('click',renderDeck);
 $('file').addEventListener('change',e=>{
   const f=e.target.files[0]; if(!f) return;
   const r=new FileReader();
-  r.onload=()=>{ $('deck').value=r.result; setStatus('Mazo cargado: '+f.name); };
+  r.onload=()=>{ $('deck').value=r.result; renderDeck(); setStatus('Mazo cargado: '+f.name); };
   r.readAsText(f);
 });
 
-function setStatus(html){ $('status').innerHTML=html; }
+initDefaults();
+renderDeck();
 
 let pyodide=null;
 async function boot(){
@@ -494,9 +591,15 @@ $('run').addEventListener('click',async()=>{
   setStatus('<span class="spin"></span>Ejecutando simulación Monte Carlo…');
   await new Promise(r=>setTimeout(r,30));
   try{
+    renderDeck(); // asegura que currentCards refleje el textarea actual
+    const present=new Set(currentCards.map(c=>c.name));
+    const htText=[...handtrapSet].filter(n=>present.has(n)).join('\n');
+    const starterLines=Object.entries(starterPower).filter(([n])=>present.has(n)).map(([n,p])=>`${n} = ${p}`);
+    const advanced=$('combos').value.split(/\r?\n/).map(s=>s.trim()).filter(l=>l.includes('+')&&l.includes('='));
+    const comboText=starterLines.concat(advanced).join('\n');
     pyodide.globals.set('DECK_TEXT',$('deck').value);
-    pyodide.globals.set('HT_TEXT',$('ht').value);
-    pyodide.globals.set('COMBO_TEXT',$('combos').value);
+    pyodide.globals.set('HT_TEXT',htText);
+    pyodide.globals.set('COMBO_TEXT',comboText);
     pyodide.globals.set('NUM_SIM',parseInt($('nsim').value,10));
     const out=await pyodide.runPythonAsync('run_analysis(DECK_TEXT, HT_TEXT, COMBO_TEXT, NUM_SIM)');
     render(JSON.parse(out));
